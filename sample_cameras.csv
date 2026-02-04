@@ -1,0 +1,4 @@
+IP,RTSP_URL,Lokasyon
+192.168.1.10,rtsp://user:pass@192.168.1.10:554/stream1,Ofis Giris
+192.168.1.11,rtsp://user:pass@192.168.1.11:554/stream1,Depo
+192.168.1.12,rtsp://user:pass@192.168.1.12:554/stream1,Otopark

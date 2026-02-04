@@ -12,6 +12,7 @@ import asyncio
 import csv
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 import platform
 import subprocess
 from typing import Iterable, List, Optional, Tuple
@@ -40,6 +41,7 @@ class CameraResult:
     detail: str
     health: str
     health_detail: str
+    thumbnail_path: Optional[str]
     alert_sent: bool
     alert_detail: str
 
@@ -140,6 +142,38 @@ def analyze_frames(frame_a: np.ndarray, frame_b: np.ndarray) -> Tuple[str, str]:
     if issues:
         return "Sorunlu", "; ".join(issues)
     return "Saglikli", f"Blur={blur_score:.1f}, MSE={mse:.2f}, Parlaklik={brightness:.1f}"
+
+
+def _sanitize_camera_id(camera_id: str) -> str:
+    return camera_id.replace(":", "_").replace("/", "_").replace(".", "_")
+
+
+def save_thumbnail(
+    rtsp_url: str,
+    output_dir: str | Path,
+    camera_id: str,
+    read_timeout_s: float = 3.0,
+) -> Tuple[Optional[str], str]:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    filename = f"{_sanitize_camera_id(camera_id)}.jpg"
+    cap = cv2.VideoCapture(rtsp_url)
+    try:
+        if not cap.isOpened():
+            return None, "RTSP bağlantısı açılamadı"
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        start = datetime.now()
+        while (datetime.now() - start).total_seconds() < read_timeout_s:
+            ok, frame = cap.read()
+            if not ok:
+                continue
+            thumbnail_path = output_path / filename
+            if cv2.imwrite(str(thumbnail_path), frame):
+                return str(thumbnail_path), "Thumbnail kaydedildi"
+            return None, "Thumbnail dosyaya yazılamadı"
+        return None, "Thumbnail alınamadı"
+    finally:
+        cap.release()
 
 
 def build_alert_message(result: CameraResult) -> str:
@@ -250,6 +284,7 @@ async def check_camera(
     stream_timeout_s: float,
     alert_config: AlertConfig,
     snmp_config: SnmpResetConfig,
+    thumbnail_dir: Optional[str],
 ) -> CameraResult:
     ping_ok, ping_ms, ping_detail = await asyncio.to_thread(ping_host, camera.ip)
     if not ping_ok:
@@ -260,6 +295,7 @@ async def check_camera(
             detail=ping_detail,
             health="Bilinmiyor",
             health_detail="Ping basarisiz",
+            thumbnail_path=None,
             alert_sent=False,
             alert_detail="Uyari gonderilmedi",
         )
@@ -278,12 +314,20 @@ async def check_camera(
             detail="RTSP zaman aşımı",
             health="Bilinmiyor",
             health_detail="RTSP zaman asimi",
+            thumbnail_path=None,
             alert_sent=False,
             alert_detail="Uyari gonderilmedi",
         )
         return await handle_alerts(result, alert_config, snmp_config)
 
     if stream_ok:
+        thumbnail_path = None
+        if thumbnail_dir:
+            thumbnail_path, thumbnail_detail = await asyncio.to_thread(
+                save_thumbnail, camera.rtsp_url, thumbnail_dir, camera.ip
+            )
+            if thumbnail_path is None:
+                stream_detail = f"{stream_detail}; {thumbnail_detail}"
         result = CameraResult(
             camera=camera,
             status="Aktif",
@@ -291,6 +335,7 @@ async def check_camera(
             detail=stream_detail,
             health=health,
             health_detail=health_detail,
+            thumbnail_path=thumbnail_path,
             alert_sent=False,
             alert_detail="Uyari gonderilmedi",
         )
@@ -302,6 +347,7 @@ async def check_camera(
         detail=stream_detail,
         health=health,
         health_detail=health_detail,
+        thumbnail_path=None,
         alert_sent=False,
         alert_detail="Uyari gonderilmedi",
     )
@@ -329,6 +375,7 @@ async def handle_alerts(
         detail=result.detail,
         health=result.health,
         health_detail=result.health_detail,
+        thumbnail_path=result.thumbnail_path,
         alert_sent=telegram_ok or email_ok or snmp_ok,
         alert_detail="; ".join(alert_details),
     )
@@ -340,12 +387,13 @@ async def run_checks(
     concurrency: int,
     alert_config: AlertConfig,
     snmp_config: SnmpResetConfig,
+    thumbnail_dir: Optional[str] = None,
 ) -> List[CameraResult]:
     semaphore = asyncio.Semaphore(concurrency)
 
     async def _wrapped(camera: Camera) -> CameraResult:
         async with semaphore:
-            return await check_camera(camera, stream_timeout_s, alert_config, snmp_config)
+            return await check_camera(camera, stream_timeout_s, alert_config, snmp_config, thumbnail_dir)
 
     tasks = [asyncio.create_task(_wrapped(camera)) for camera in cameras]
     return await asyncio.gather(*tasks)
@@ -364,6 +412,7 @@ def write_report(results: Iterable[CameraResult], output_path: str) -> None:
                 "Detay",
                 "Saglik",
                 "Saglik_Detay",
+                "Thumbnail",
                 "Uyari",
                 "Uyari_Detay",
             ]
@@ -379,6 +428,7 @@ def write_report(results: Iterable[CameraResult], output_path: str) -> None:
                     result.detail,
                     result.health,
                     result.health_detail,
+                    result.thumbnail_path or "",
                     "Evet" if result.alert_sent else "Hayir",
                     result.alert_detail,
                 ]
@@ -433,6 +483,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snmp-community", default="", help="SNMP community")
     parser.add_argument("--snmp-ifindex", type=int, default=0, help="Resetlenecek port ifIndex")
     parser.add_argument("--output", default="", help="Rapor CSV dosya yolu")
+    parser.add_argument(
+        "--thumbnail-dir",
+        default="thumbnails",
+        help="Thumbnail kaydetme klasoru (bos ise devre disi)",
+    )
     return parser.parse_args()
 
 
@@ -469,7 +524,10 @@ def main() -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"kamera_raporu_{timestamp}.csv"
 
-    results = asyncio.run(run_checks(cameras, args.stream_timeout, args.concurrency, alert_config, snmp_config))
+    thumbnail_dir = args.thumbnail_dir.strip() if args.thumbnail_dir else None
+    results = asyncio.run(
+        run_checks(cameras, args.stream_timeout, args.concurrency, alert_config, snmp_config, thumbnail_dir)
+    )
     write_report(results, output_path)
     print_summary(results)
     print(f"\nRapor yazildi: {output_path}")

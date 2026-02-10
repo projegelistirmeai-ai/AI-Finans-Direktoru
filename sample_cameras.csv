@@ -1,0 +1,7 @@
+IP,RTSP_URL,Lokasyon
+172.16.41.111,rtsp://admin:Kz987fvg@172.16.41.111:554/stream1,Kamera 1
+172.16.41.28,rtsp://admin:Kz987fvg@172.16.41.28:554/stream1,Kamera 2
+172.16.41.58,rtsp://admin:Kz987fvg@172.16.41.58:554/stream1,Kamera 3
+172.16.41.104,rtsp://admin:Kz987fvg@172.16.41.104:554/stream1,Kamera 4
+172.16.41.96,rtsp://admin:Kz987fvg@172.16.41.96:554/stream1,Kamera 5
+172.16.41.26,rtsp://admin:Kz987fvg@172.16.41.26:554/stream1,Kamera 6
